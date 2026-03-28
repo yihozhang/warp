@@ -1,6 +1,4 @@
-use egg::{
-    define_language, DidMerge, Id, RecExpr, Rewrite,
-};
+use egg::{define_language, DidMerge, Id, RecExpr, Rewrite};
 
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
@@ -342,11 +340,7 @@ impl egg::Analysis<Math> for Meta {
 
     fn modify(_egraph: &mut EGraph, _id: Id) {}
     fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
-        let sparsity = [a.sparsity, b.sparsity]
-            .iter()
-            .flatten()
-            .min()
-            .copied();
+        let sparsity = [a.sparsity, b.sparsity].iter().flatten().min().copied();
         let nnz = [a.nnz, b.nnz].iter().flatten().min().copied();
         debug_assert_eq!(&a.schema, &b.schema);
         let schema = a.schema.clone();
@@ -384,14 +378,20 @@ impl egg::Analysis<Math> for Meta {
                 let mut s = xd.schema.as_ref().unwrap().get_schm().clone();
                 s.extend(yd.schema.as_ref().unwrap().get_schm().clone());
                 let sparsity = match enode {
-                    Add(..) => xd.sparsity.and_then(|a| yd.sparsity.map(|b| min(1.0.into(), a + b))),
+                    Add(..) => xd
+                        .sparsity
+                        .and_then(|a| yd.sparsity.map(|b| min(1.0.into(), a + b))),
                     _ => min(xd.sparsity, yd.sparsity),
                 };
                 let nnz = sparsity.map(|sp| {
                     let vol: usize = s.values().product();
                     (NotNan::from(vol as f64) * sp).round() as usize
                 });
-                MetaData { schema: Some(Schema::Schm(s)), sparsity, nnz }
+                MetaData {
+                    schema: Some(Schema::Schm(s)),
+                    sparsity,
+                    nnz,
+                }
             }
             Agg([dim, body]) => {
                 let k = schm(dim).get_dims().0.clone();
@@ -399,9 +399,15 @@ impl egg::Analysis<Math> for Meta {
                 let mut body_schm = bd.schema.as_ref().unwrap().get_schm().clone();
                 body_schm.remove(&k);
                 let vol: usize = body_schm.values().product();
-                let sparsity = bd.nnz.map(|nnz| min(1.0.into(), NotNan::from(nnz as f64 / vol as f64)));
+                let sparsity = bd
+                    .nnz
+                    .map(|nnz| min(1.0.into(), NotNan::from(nnz as f64 / vol as f64)));
                 let nnz = bd.nnz.map(|z| min(vol, z));
-                MetaData { schema: Some(Schema::Schm(body_schm)), sparsity, nnz }
+                MetaData {
+                    schema: Some(Schema::Schm(body_schm)),
+                    sparsity,
+                    nnz,
+                }
             }
             RMMul([x, y]) => {
                 let mut xs = d(x).schema.as_ref().unwrap().get_schm().clone();
@@ -412,19 +418,37 @@ impl egg::Analysis<Math> for Meta {
                 xs.extend(ys);
                 xs.remove(&j);
                 let vol: usize = xs.values().product();
-                MetaData { schema: Some(Schema::Schm(xs)), sparsity: Some(1.0.into()), nnz: Some(vol) }
+                MetaData {
+                    schema: Some(Schema::Schm(xs)),
+                    sparsity: Some(1.0.into()),
+                    nnz: Some(vol),
+                }
             }
             Lit([num]) => {
                 let nd = d(num);
-                MetaData { schema: Some(Schema::Schm(HashMap::default())), sparsity: nd.sparsity, nnz: nd.nnz }
+                MetaData {
+                    schema: Some(Schema::Schm(HashMap::default())),
+                    sparsity: nd.sparsity,
+                    nnz: nd.nnz,
+                }
             }
             Mat([_x, i_dim, j_dim, nnz_id]) => {
-                let (i, n) = { let s = schm(i_dim).get_dims(); (s.0.clone(), *s.1) };
-                let (j, m) = { let s = schm(j_dim).get_dims(); (s.0.clone(), *s.1) };
+                let (i, n) = {
+                    let s = schm(i_dim).get_dims();
+                    (s.0.clone(), *s.1)
+                };
+                let (j, m) = {
+                    let s = schm(j_dim).get_dims();
+                    (s.0.clone(), *s.1)
+                };
                 let nnz = d(nnz_id).nnz;
                 let mut s = HashMap::new();
-                if n != 1 { s.insert(i, n); }
-                if m != 1 { s.insert(j, m); }
+                if n != 1 {
+                    s.insert(i, n);
+                }
+                if m != 1 {
+                    s.insert(j, m);
+                }
                 MetaData {
                     schema: Some(Schema::Schm(s)),
                     nnz,
@@ -434,11 +458,21 @@ impl egg::Analysis<Math> for Meta {
             Dim([name_id, size_id]) => {
                 let name = schm(name_id).get_name().clone();
                 let size = *schm(size_id).get_size();
-                MetaData { schema: Some(Schema::Dims(name, size)), nnz: None, sparsity: None }
+                MetaData {
+                    schema: Some(Schema::Dims(name, size)),
+                    nnz: None,
+                    sparsity: None,
+                }
             }
             Sub([e, v, body]) => {
-                let (e_i, e_n) = { let s = schm(e).get_dims(); (s.0.clone(), *s.1) };
-                let (v_i, v_n) = { let s = schm(v).get_dims(); (s.0.clone(), *s.1) };
+                let (e_i, e_n) = {
+                    let s = schm(e).get_dims();
+                    (s.0.clone(), *s.1)
+                };
+                let (v_i, v_n) = {
+                    let s = schm(v).get_dims();
+                    (s.0.clone(), *s.1)
+                };
                 debug_assert_eq!(e_n, v_n, "substituting for different size");
                 let (body_schm, body_nnz, body_sp) = {
                     let bd = d(body);
@@ -447,17 +481,26 @@ impl egg::Analysis<Math> for Meta {
                 let new_schema = match body_schm.as_ref().unwrap() {
                     Schema::Schm(s) => {
                         let mut res = s.clone();
-                        if let Some(m) = res.remove(&v_i) { res.insert(e_i, m); }
+                        if let Some(m) = res.remove(&v_i) {
+                            res.insert(e_i, m);
+                        }
                         Schema::Schm(res)
                     }
                     Schema::Dims(body_i, body_n) => {
-                        if *body_i == v_i { Schema::Dims(e_i, e_n) }
-                        else { Schema::Dims(body_i.clone(), *body_n) }
+                        if *body_i == v_i {
+                            Schema::Dims(e_i, e_n)
+                        } else {
+                            Schema::Dims(body_i.clone(), *body_n)
+                        }
                     }
                     Schema::Size(n) => panic!("cannot subst for size {:?}", n),
                     _ => panic!("cannot subst for attr. and mat"),
                 };
-                MetaData { schema: Some(new_schema), nnz: body_nnz, sparsity: body_sp }
+                MetaData {
+                    schema: Some(new_schema),
+                    nnz: body_nnz,
+                    sparsity: body_sp,
+                }
             }
             Var([_]) => MetaData {
                 schema: Some(Schema::Schm(HashMap::default())),
@@ -469,71 +512,147 @@ impl egg::Analysis<Math> for Meta {
                 nnz: Some(if *n == 0 { 0 } else { 1 }),
                 sparsity: Some(if *n == 0 { 0.0.into() } else { 1.0.into() }),
             },
-            Nnz([n]) => MetaData { schema: None, nnz: Some(*schm(n).get_size()), sparsity: None },
+            Nnz([n]) => MetaData {
+                schema: None,
+                nnz: Some(*schm(n).get_size()),
+                sparsity: None,
+            },
             Str(s) => MetaData {
                 schema: Some(Schema::Name(s.clone())),
                 nnz: Some(1),
                 sparsity: Some(1.0.into()),
             },
-            Udf([op_id, arg_id]) => {
-                let op_s = schm(op_id).get_name().clone();
-                let arg_data = d(arg_id);
-                udf_meta(&op_s, &[arg_data])
+            Udf(ch) => {
+                let op_s = egraph[ch[0]].data.schema.as_ref().unwrap().get_name();
+                let args = ch[1..].iter().map(|c| &egraph[*c].data).collect::<Vec<_>>();
+                udf_meta(op_s, args.as_slice())
             }
             LMat([_x, row, col, nnz_id]) => {
                 let row_sz = *schm(row).get_size();
                 let col_sz = *schm(col).get_size();
                 let nnz = d(nnz_id).nnz;
-                MetaData { schema: Some(Schema::Mat(row_sz, col_sz)), nnz, sparsity: None }
+                MetaData {
+                    schema: Some(Schema::Mat(row_sz, col_sz)),
+                    nnz,
+                    sparsity: None,
+                }
             }
             LMin([x, y]) | LAdd([x, y]) | LMul([x, y]) => {
-                let (x_i, x_j) = { let s = schm(x).get_mat(); (*s.0, *s.1) };
-                let (y_i, y_j) = { let s = schm(y).get_mat(); (*s.0, *s.1) };
+                let (x_i, x_j) = {
+                    let s = schm(x).get_mat();
+                    (*s.0, *s.1)
+                };
+                let (y_i, y_j) = {
+                    let s = schm(y).get_mat();
+                    (*s.0, *s.1)
+                };
                 dims_ok(x_i, x_j, y_i, y_j);
                 let row = if x_i == 1 { y_i } else { x_i };
                 let col = if x_j == 1 { y_j } else { x_j };
-                MetaData { schema: Some(Schema::Mat(row, col)), nnz: None, sparsity: None }
+                MetaData {
+                    schema: Some(Schema::Mat(row, col)),
+                    nnz: None,
+                    sparsity: None,
+                }
             }
             MMul([x, y]) => {
-                let (x_i, x_j) = { let s = schm(x).get_mat(); (*s.0, *s.1) };
-                let (y_i, y_j) = { let s = schm(y).get_mat(); (*s.0, *s.1) };
+                let (x_i, x_j) = {
+                    let s = schm(x).get_mat();
+                    (*s.0, *s.1)
+                };
+                let (y_i, y_j) = {
+                    let s = schm(y).get_mat();
+                    (*s.0, *s.1)
+                };
                 debug_assert_eq!(x_j, y_i, "wrong dimensions in mmul");
-                MetaData { schema: Some(Schema::Mat(x_i, y_j)), nnz: None, sparsity: None }
+                MetaData {
+                    schema: Some(Schema::Mat(x_i, y_j)),
+                    nnz: None,
+                    sparsity: None,
+                }
             }
             LTrs([a]) => {
-                let (x_i, x_j) = { let s = schm(a).get_mat(); (*s.0, *s.1) };
-                MetaData { schema: Some(Schema::Mat(x_j, x_i)), nnz: None, sparsity: None }
+                let (x_i, x_j) = {
+                    let s = schm(a).get_mat();
+                    (*s.0, *s.1)
+                };
+                MetaData {
+                    schema: Some(Schema::Mat(x_j, x_i)),
+                    nnz: None,
+                    sparsity: None,
+                }
             }
             Srow([a]) => {
                 let x_i = *schm(a).get_mat().0;
-                MetaData { schema: Some(Schema::Mat(x_i, 1)), nnz: None, sparsity: None }
+                MetaData {
+                    schema: Some(Schema::Mat(x_i, 1)),
+                    nnz: None,
+                    sparsity: None,
+                }
             }
             Scol([a]) => {
                 let x_j = *schm(a).get_mat().1;
-                MetaData { schema: Some(Schema::Mat(1, x_j)), nnz: None, sparsity: None }
+                MetaData {
+                    schema: Some(Schema::Mat(1, x_j)),
+                    nnz: None,
+                    sparsity: None,
+                }
             }
-            Sall([_]) => MetaData { schema: Some(Schema::Mat(1, 1)), nnz: None, sparsity: None },
+            Sall([_]) => MetaData {
+                schema: Some(Schema::Mat(1, 1)),
+                nnz: None,
+                sparsity: None,
+            },
             Bind([i, j, x]) => {
                 let i_name = schm(i).get_name().clone();
                 let j_name = schm(j).get_name().clone();
-                let (x_row, x_col) = { let s = schm(x).get_mat(); (*s.0, *s.1) };
-                let (x_nnz, x_sp) = { let xd = d(x); (xd.nnz, xd.sparsity) };
+                let (x_row, x_col) = {
+                    let s = schm(x).get_mat();
+                    (*s.0, *s.1)
+                };
+                let (x_nnz, x_sp) = {
+                    let xd = d(x);
+                    (xd.nnz, xd.sparsity)
+                };
                 let mut s = HashMap::new();
-                if x_row != 1 { s.insert(i_name, x_row); }
-                if x_col != 1 { s.insert(j_name, x_col); }
-                MetaData { schema: Some(Schema::Schm(s)), nnz: x_nnz, sparsity: x_sp }
+                if x_row != 1 {
+                    s.insert(i_name, x_row);
+                }
+                if x_col != 1 {
+                    s.insert(j_name, x_col);
+                }
+                MetaData {
+                    schema: Some(Schema::Schm(s)),
+                    nnz: x_nnz,
+                    sparsity: x_sp,
+                }
             }
             Ubnd([i, j, x]) => {
                 let i_name = schm(i).get_name().clone();
                 let j_name = schm(j).get_name().clone();
                 let x_schm = schm(x).get_schm().clone();
-                let (x_nnz, x_sp) = { let xd = d(x); (xd.nnz, xd.sparsity) };
+                let (x_nnz, x_sp) = {
+                    let xd = d(x);
+                    (xd.nnz, xd.sparsity)
+                };
                 let row = *x_schm.get(&i_name).unwrap_or(&1);
                 let col = *x_schm.get(&j_name).unwrap_or(&1);
-                MetaData { schema: Some(Schema::Mat(row, col)), nnz: x_nnz, sparsity: x_sp }
+                MetaData {
+                    schema: Some(Schema::Mat(row, col)),
+                    nnz: x_nnz,
+                    sparsity: x_sp,
+                }
             }
-            LLit([_]) => MetaData { schema: Some(Schema::Mat(1, 1)), nnz: None, sparsity: None },
-            TWrite(_) => MetaData { schema: None, nnz: None, sparsity: None },
+            LLit([_]) => MetaData {
+                schema: Some(Schema::Mat(1, 1)),
+                nnz: None,
+                sparsity: None,
+            },
+            TWrite(_) => MetaData {
+                schema: None,
+                nnz: None,
+                sparsity: None,
+            },
         }
     }
 }
@@ -547,7 +666,8 @@ fn dims_ok(x_i: usize, x_j: usize, y_i: usize, y_j: usize) {
             || (y_i == 1 && x_j == y_j)
             || (x_i == 1 && x_j == 1)
             || (y_i == 1 && y_j == 1),
-        "{:?}", (x_i, x_j, y_i, y_j)
+        "{:?}",
+        (x_i, x_j, y_i, y_j)
     );
 }
 
@@ -566,7 +686,7 @@ define_language! {
         "b+" = Bind([Id; 3]) ,
         "b-" = Ubnd([Id; 3]) ,
         "llit" = LLit([Id; 1]) ,
-        "udf" = Udf([Id; 2]) ,
+        "udf" = Udf(Vec<Id>) ,
         // RA
         "+" = Add([Id; 2]),
         "*" = Mul([Id; 2]),

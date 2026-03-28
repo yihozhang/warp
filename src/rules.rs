@@ -97,9 +97,9 @@ pub fn rules() -> Vec<Rewrite<Math, Meta>> {
         rw!("distribute-lft-in"; "(* ?a (+ ?b ?c))" => "(+ (* ?a ?b) (* ?a ?c))"),
         rw!("distribute-rgt-in"; "(* ?a (+ ?b ?c))" => "(+ (* ?b ?a) (* ?c ?a))"),
         rw!("distribute-lft-out"; "(+ (* ?a ?b) (* ?a ?c))" => "(* ?a (+ ?b ?c))"),
-        rw!("distribute-lft-out--"; "(- (* ?a ?b) (* ?a ?c))" => "(* ?a (- ?b ?c))"),
+        // rw!("distribute-lft-out--"; "(- (* ?a ?b) (* ?a ?c))" => "(* ?a (- ?b ?c))"),
         rw!("distribute-rgt-out"; "(+ (* ?b ?a) (* ?c ?a))" => "(* ?a (+ ?b ?c))"),
-        rw!("distribute-rgt-out--"; "(- (* ?b ?a) (* ?c ?a))" => "(* ?a (- ?b ?c))"),
+        // rw!("distribute-rgt-out--"; "(- (* ?b ?a) (* ?c ?a))" => "(* ?a (- ?b ?c))"),
         rw!("distribute-lft1-in"; "(+ (* ?b ?a) ?a)" => "(* (+ ?b (lit 1)) ?a)"),
         rw!("distribute-rgt1-in"; "(+ ?a (* ?c ?a))" => "(* (+ ?c (lit 1)) ?a)"),
         rw!("pullup-add"; "(sum ?i (+ ?a ?b))" => "(+ (sum ?i ?a) (sum ?i ?b))"),
@@ -132,6 +132,7 @@ pub fn rules() -> Vec<Rewrite<Math, Meta>> {
     ]
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct Axpy;
 impl Applier<Math, Meta> for Axpy {
@@ -180,6 +181,7 @@ impl Applier<Math, Meta> for Axpy {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct UdfRn;
 impl Applier<Math, Meta> for UdfRn {
@@ -301,6 +303,7 @@ impl Applier<Math, Meta> for UdfRn {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct Sprop;
 impl Applier<Math, Meta> for Sprop {
@@ -337,6 +340,7 @@ impl Applier<Math, Meta> for Sprop {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct MOneMul;
 impl Applier<Math, Meta> for MOneMul {
@@ -423,6 +427,7 @@ impl Applier<Math, Meta> for AggMMul {
     }
 }
 
+#[allow(unused)]
 #[derive(Debug)]
 struct Foundit;
 
@@ -446,7 +451,7 @@ impl Applier<Math, Meta> for SubstAgg {
     fn apply_one(
         &self,
         egraph: &mut egg::EGraph<Math, Meta>,
-        _eclass: egg::Id,
+        eclass: egg::Id,
         subst: &egg::Subst,
         _searcher_ast: Option<&egg::PatternAst<Math>>,
         _rule_name: egg::Symbol,
@@ -462,6 +467,7 @@ impl Applier<Math, Meta> for SubstAgg {
             let sub_body = egraph.add(Math::Sub([e, v1, body]));
             egraph.add(Math::Agg([v2, sub_body]))
         };
+        egraph.union(eclass, res);
 
         vec![res]
     }
@@ -608,7 +614,7 @@ impl Applier<Math, Meta> for DimSubst {
     fn apply_one(
         &self,
         egraph: &mut egg::EGraph<Math, Meta>,
-        _eclass: egg::Id,
+        eclass: egg::Id,
         subst: &egg::Subst,
         _searcher_ast: Option<&egg::PatternAst<Math>>,
         _rule_name: egg::Symbol,
@@ -623,6 +629,7 @@ impl Applier<Math, Meta> for DimSubst {
         } else {
             egraph.add(Math::Dim([i, n]))
         };
+        egraph.union(eclass, res);
 
         vec![res]
     }
