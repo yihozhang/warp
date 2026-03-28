@@ -1,7 +1,4 @@
-use egg::{
-    egraph::{EClass, EGraph},
-    expr::{Expr, Id, Language, RecExpr},
-};
+use egg::{Analysis, EClass, EGraph, Id, Language, RecExpr};
 
 use indexmap::IndexMap;
 use std::cmp::Ordering;
@@ -13,7 +10,7 @@ pub struct CostExpr<L: Language> {
     pub expr: RecExpr<L>,
 }
 
-pub struct Extractor<'a, L: Language, M> {
+pub struct Extractor<'a, L: Language, M: Analysis<L>> {
     costs: IndexMap<Id, Cost>,
     egraph: &'a EGraph<L, M>,
     model: fn(&L, &[Cost]) -> Cost,
@@ -29,21 +26,30 @@ fn cmp(a: &Option<Cost>, b: &Option<Cost>) -> Ordering {
     }
 }
 
-impl<'a, L: Language, M> Extractor<'a, L, M> {
-    pub fn new(egraph: &'a EGraph<L, M>,
-               model: fn(&L, &[Cost]) -> Cost,
-    ) -> Self {
+impl<'a, L: Language, M: Analysis<L>> Extractor<'a, L, M> {
+    pub fn new(egraph: &'a EGraph<L, M>, model: fn(&L, &[Cost]) -> Cost) -> Self {
         let costs = IndexMap::default();
-        let mut extractor = Extractor { costs, egraph, model };
+        let mut extractor = Extractor {
+            costs,
+            egraph,
+            model,
+        };
         extractor.find_costs();
 
         extractor
     }
 
     pub fn calculate_cost(&self, expr: &RecExpr<L>) -> Cost {
-        let child_costs: Vec<_> =
-            expr.as_ref().children.iter().map(|e| self.calculate_cost(e)).collect();
-        (self.model)(&expr.as_ref().op, &child_costs)
+        let mut costs: Vec<Cost> = Vec::with_capacity(expr.as_ref().len());
+        for node in expr.as_ref() {
+            let child_costs: Vec<_> = node
+                .children()
+                .iter()
+                .map(|id| costs[usize::from(*id)])
+                .collect();
+            costs.push((self.model)(node, &child_costs));
+        }
+        costs.last().copied().unwrap_or(0.0)
     }
 
     pub fn find_best(&self, eclass: Id) -> CostExpr<L> {
@@ -53,28 +59,41 @@ impl<'a, L: Language, M> Extractor<'a, L, M> {
     }
 
     fn find_best_expr(&self, eclass: Id) -> RecExpr<L> {
-        let eclass = self.egraph.find(eclass);
+        fn build_best_expr<L: Language, M: Analysis<L>>(
+            extractor: &Extractor<'_, L, M>,
+            eclass: Id,
+            expr: &mut RecExpr<L>,
+        ) -> Id {
+            let eclass = extractor.egraph.find(eclass);
 
-        let best_node = self.egraph[eclass]
-            .iter()
-            .filter(|n| self.node_total_cost(n).is_some())
-            .min_by(|a, b| {
-                let a = self.node_total_cost(a);
-                let b = self.node_total_cost(b);
-                cmp(&a, &b)
-            })
-            .expect("eclass shouldn't be empty");
+            let best_node = extractor.egraph[eclass]
+                .iter()
+                .filter(|n| extractor.node_total_cost(n).is_some())
+                .min_by(|a, b| {
+                    let a = extractor.node_total_cost(a);
+                    let b = extractor.node_total_cost(b);
+                    cmp(&a, &b)
+                })
+                .expect("eclass shouldn't be empty");
 
-        best_node
-            .clone()
-            .map_children(|child| self.find_best_expr(child))
-            .into()
+            let node = best_node
+                .clone()
+                .map_children(|child| build_best_expr(extractor, child, expr));
+            expr.add(node)
+        }
+
+        let mut expr = RecExpr::default();
+        build_best_expr(self, eclass, &mut expr);
+        expr
     }
 
-    fn node_total_cost(&self, node: &Expr<L, Id>) -> Option<Cost> {
-        let child_costs: Option<Vec<_>> =
-            node.children.iter().map(|id| self.costs.get(id).cloned()).collect();
-        let cost = (self.model)(&node.op, &child_costs?);
+    fn node_total_cost(&self, node: &L) -> Option<Cost> {
+        let child_costs: Option<Vec<_>> = node
+            .children()
+            .iter()
+            .map(|id| self.costs.get(id).cloned())
+            .collect();
+        let cost = (self.model)(node, &child_costs?);
         Some(cost)
     }
 
@@ -99,7 +118,11 @@ impl<'a, L: Language, M> Extractor<'a, L, M> {
         }
     }
 
-    fn make_pass(&self, eclass: &EClass<L, M>) -> Option<Cost> {
-        eclass.iter().map(|n| self.node_total_cost(n)).min_by(cmp).unwrap()
+    fn make_pass(&self, eclass: &EClass<L, <M as Analysis<L>>::Data>) -> Option<Cost> {
+        eclass
+            .iter()
+            .map(|n| self.node_total_cost(n))
+            .min_by(cmp)
+            .unwrap()
     }
 }
