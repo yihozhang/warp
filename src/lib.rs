@@ -1,17 +1,12 @@
 use egg::{
-    define_term,
-    egraph::EClass,
-    expr::{Expr, RecExpr, Language, Id},
-    pattern::{Rewrite, RewriteMatches},
+    define_language, DidMerge, Id, RecExpr, Rewrite,
 };
 
-use std::collections::{HashSet, HashMap};
-use std::hash::Hash;
 use std::cmp::min;
+use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::iter::*;
 use std::time::Instant;
-
-use rand::seq::SliceRandom;
 
 use ordered_float::NotNan;
 
@@ -29,15 +24,18 @@ pub use rules::{rules, trans_rules, untrans_rules};
 mod extract;
 pub use extract::*;
 
-pub type EGraph = egg::egraph::EGraph<Math, Meta>;
+pub type EGraph = egg::EGraph<Math, Meta>;
 
 type Number = NotNan<f64>;
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Meta;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Meta {
-    schema:   Option<Schema>,
+pub struct MetaData {
+    schema: Option<Schema>,
     sparsity: Option<NotNan<f64>>,
-    nnz:      Option<usize>,
+    nnz: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,98 +48,66 @@ pub enum Schema {
 }
 
 pub fn dag_cost(eg: &EGraph) -> usize {
-    eg.classes().map(|c| {
-        let nnz = c.metadata.nnz;
-        if let Some(Schema::Schm(_)) = c.metadata.schema {
-            nnz.unwrap_or(get_vol(&c.metadata))
-        } else {
-            0
-        }
-    }).sum()
+    eg.classes()
+        .map(|c| {
+            let nnz = c.data.nnz;
+            if let Some(Schema::Schm(_)) = c.data.schema {
+                nnz.unwrap_or(get_vol(&c.data))
+            } else {
+                0
+            }
+        })
+        .sum()
 }
 
-fn saturate(
-    egraph: &mut EGraph,
-    rws: &[Rewrite<Math, Meta>],
-    iters: usize,
-    randomize: bool
-) {
-    let mut rng = rand::thread_rng();
+fn saturate(egraph: &mut EGraph, rws: &[Rewrite<Math, Meta>], iters: usize, _randomize: bool) {
     let limit = 8000000;
     let start_time = Instant::now();
     'outer: for i in 1..iters {
         info!("\n\nIteration {}\n", i);
-        let search_time = Instant::now();
         let mut applied = 0;
-        let mut matches = Vec::new();
         for rw in rws {
-            let ms = rw.search(&egraph);
+            let ms = rw.search(egraph);
             if !ms.is_empty() {
-                matches.push(ms);
+                let new_ids = rw.apply(egraph, &ms);
+                applied += new_ids.len();
             }
-        }
-        info!("Search time: {:?}", search_time.elapsed());
-        let match_time = Instant::now();
-        for m in matches {
-            let actually_matched =
-                if randomize {
-                    m.apply_random(
-                        egraph,
-                        limit,
-                        5, &mut rng
-                    ).len()
-                } else {
-                    m.apply_with_limit(
-                        egraph,
-                        limit
-                    ).len()
-                };
             if egraph.total_size() > limit {
                 error!("Node limit exceeded. {} > {}", egraph.total_size(), limit);
                 break 'outer;
             }
-
-            applied += actually_matched;
-            if actually_matched > 0 {
-                info!("Applied {} {} times", m.rewrite.name, actually_matched);
-            }
         }
-        info!("Match time: {:?}", match_time.elapsed());
-        let rebuild_time = Instant::now();
         egraph.rebuild();
-        info!("Rebuild time: {:?}", rebuild_time.elapsed());
         info!(
             "Size: n={}, e={}",
             egraph.total_size(),
             egraph.number_of_classes()
         );
-
         if applied == 0 {
             info!("Stopping early!");
             break;
         }
     }
-    let rules_time = start_time.elapsed();
-    info!("Rules time: {:?}", rules_time);
+    info!("Rules time: {:?}", start_time.elapsed());
 }
 
-pub fn udf_meta(op: &str, children: &[&Meta]) -> Meta {
+pub fn udf_meta(op: &str, children: &[&MetaData]) -> MetaData {
     match op {
         "axpy" => {
             let x = &children[0];
             let x_schema = &children[0].schema.as_ref().unwrap();
-            let p = &children[1];
-            let p_schema = &children[1].schema.as_ref().unwrap();
+            let _p = &children[1];
+            let _p_schema = &children[1].schema.as_ref().unwrap();
             let y = &children[2];
             let y_schema = &children[2].schema.as_ref().unwrap();
 
             let (x_i, x_j) = x_schema.get_mat();
-            let (p_i, p_j) = x_schema.get_mat();
-            let (y_i, y_j) = y_schema.get_mat();
+            let (_p_i, _p_j) = x_schema.get_mat();
+            let (_y_i, _y_j) = y_schema.get_mat();
 
-            let sparsity = x.sparsity.and_then(|x| y.sparsity.map(|y| {
-                min(1.0.into(), x + y)
-            }));
+            let sparsity = x
+                .sparsity
+                .and_then(|x| y.sparsity.map(|y| min(1.0.into(), x + y)));
 
             let nnz = sparsity.map(|sp| {
                 let vol: usize = x_i * x_j;
@@ -150,10 +116,11 @@ pub fn udf_meta(op: &str, children: &[&Meta]) -> Meta {
             });
 
             let schema = Some(Schema::Mat(*x_i, *x_j));
-            Meta {
-                schema, sparsity, nnz
+            MetaData {
+                schema,
+                sparsity,
+                nnz,
             }
-
         }
         "b(/)" => {
             let x = &children[0];
@@ -175,12 +142,12 @@ pub fn udf_meta(op: &str, children: &[&Meta]) -> Meta {
                 nnz.round() as usize
             });
 
-            Meta {
+            MetaData {
                 schema: Some(Schema::Mat(*row, *col)),
                 nnz,
-                sparsity
+                sparsity,
             }
-        },
+        }
         "m1mul" => {
             let x_schema = &children[0].schema.as_ref().unwrap();
             let y_schema = &children[1].schema.as_ref().unwrap();
@@ -192,12 +159,12 @@ pub fn udf_meta(op: &str, children: &[&Meta]) -> Meta {
             let row = if *x_i == 1 { y_i } else { x_i };
             let col = if *x_j == 1 { y_j } else { x_j };
 
-            Meta {
+            MetaData {
                 schema: Some(Schema::Mat(*row, *col)),
                 nnz: None,
-                sparsity: None
+                sparsity: None,
             }
-        },
+        }
         "rix" => {
             // NOTE might want to tweak the nnz here
             let x = &children[0];
@@ -205,12 +172,12 @@ pub fn udf_meta(op: &str, children: &[&Meta]) -> Meta {
             let row = r.get_size();
             let c = &children[6].schema.as_ref().unwrap();
             let col = c.get_size();
-            Meta {
+            MetaData {
                 schema: Some(Schema::Mat(*row, *col)),
                 nnz: x.nnz,
                 sparsity: x.sparsity,
             }
-        },
+        }
         "lix" => {
             // NOTE might want to tweak the nnz here
             let x = &children[0];
@@ -218,12 +185,12 @@ pub fn udf_meta(op: &str, children: &[&Meta]) -> Meta {
             let row = r.get_size();
             let c = &children[7].schema.as_ref().unwrap();
             let col = c.get_size();
-            Meta {
+            MetaData {
                 schema: Some(Schema::Mat(*row, *col)),
                 nnz: x.nnz,
                 sparsity: x.sparsity,
             }
-        },
+        }
         "r(diag)" => {
             let x = &children[0];
             let x_schema = &children[0].schema.as_ref().unwrap();
@@ -231,18 +198,16 @@ pub fn udf_meta(op: &str, children: &[&Meta]) -> Meta {
 
             let vol: Number = ((x_i * x_i * x_j * x_j) as f64).into();
 
-            Meta {
+            MetaData {
                 schema: Some(Schema::Mat(x_i * x_j, x_i * x_j)),
                 nnz: x.nnz,
                 sparsity: x.sparsity.map(|sp| sp / vol),
             }
-        },
-        "u(ncol)" | "u(nrow)" => {
-            Meta {
-                schema: Some(Schema::Mat(1, 1)),
-                nnz: Some(1),
-                sparsity: Some(1.0.into())
-            }
+        }
+        "u(ncol)" | "u(nrow)" => MetaData {
+            schema: Some(Schema::Mat(1, 1)),
+            nnz: Some(1),
+            sparsity: Some(1.0.into()),
         },
         "ua(minR)" => {
             let x = &children[0];
@@ -251,34 +216,30 @@ pub fn udf_meta(op: &str, children: &[&Meta]) -> Meta {
             let sparsity = x.sparsity;
             let nnz = sparsity.map(|s| s.round() as usize * x_i);
 
-            Meta {
+            MetaData {
                 schema: Some(Schema::Mat(*x_i, 1)),
                 nnz,
-                sparsity
+                sparsity,
             }
-        },
+        }
         // NOTE nnz here can be wrong
-        "b(^)" | "b(min)" | "b(&)" | "u(sqrt)" | "b(!=)" |
-        "b(==)" | "b(>)" | "b(>=)" | "b(<)" | "b(<=)" |
-        "u(exp)" | "u(log)" | "sprop" | "selp" => {
+        "b(^)" | "b(min)" | "b(&)" | "u(sqrt)" | "b(!=)" | "b(==)" | "b(>)" | "b(>=)" | "b(<)"
+        | "b(<=)" | "u(exp)" | "u(log)" | "sprop" | "selp" => {
             println!("got some");
             children[0].clone()
-        },
-        _ => panic!("Unknown udf {}", op)
+        }
+        _ => panic!("Unknown udf {}", op),
     }
 }
 
-pub fn optimize(lgraph: EGraph, roots: Vec<u32>) -> Vec<RecExpr<Math>> {
-
+pub fn optimize(lgraph: EGraph, roots: Vec<Id>) -> Vec<RecExpr<Math>> {
     // Translate LA plan to RA
     println!("Translate LA plan to RA");
     let start_time = Instant::now();
     let (mut trans_graph, roots) = (lgraph, roots);
     saturate(&mut trans_graph, &trans_rules(), 27, false);
     let trans_ext = Extractor::new(&trans_graph, trans_model);
-    let rplans: Vec<_> = roots.iter().map(|r| {
-        trans_ext.find_best(*r).expr
-    }).collect();
+    let rplans: Vec<_> = roots.iter().map(|r| trans_ext.find_best(*r).expr).collect();
     let trans_time = start_time.elapsed();
     println!("TRANS TIME {:?}", trans_time);
     for rp in rplans.iter() {
@@ -288,10 +249,8 @@ pub fn optimize(lgraph: EGraph, roots: Vec<u32>) -> Vec<RecExpr<Math>> {
     println!("Optimize RA plan");
     let start_time = Instant::now();
     let mut opt_graph = EGraph::default();
-    let opt_roots: Vec<_> = rplans.iter().map(|rp| {
-        opt_graph.add_expr(rp)
-    }).collect();
-    let orig_cost = dag_cost(&opt_graph);
+    let opt_roots: Vec<_> = rplans.iter().map(|rp| opt_graph.add_expr(rp)).collect();
+    let _orig_cost = dag_cost(&opt_graph);
     //println!("ROOT {:?}", opt_roots);
     saturate(&mut opt_graph, &rules(), 17, true);
     let sat_time = start_time.elapsed();
@@ -299,10 +258,8 @@ pub fn optimize(lgraph: EGraph, roots: Vec<u32>) -> Vec<RecExpr<Math>> {
     println!("DONE SATURATING");
 
     let start_time = Instant::now();
-    let ext = Extractor::new(&opt_graph, <Math as Language>::cost);
-    let bests = opt_roots.iter().map(|r| {
-        ext.find_best(*r).expr
-    }).collect();
+    let ext = Extractor::new(&opt_graph, trans_model);
+    let bests = opt_roots.iter().map(|r| ext.find_best(*r).expr).collect();
     let solv_time = start_time.elapsed();
     println!("SOLVE TIME {:?}", solv_time);
 
@@ -380,17 +337,19 @@ impl Schema {
     }
 }
 
-impl egg::egraph::Metadata<Math> for Meta {
-    type Error = std::convert::Infallible;
+impl egg::Analysis<Math> for Meta {
+    type Data = MetaData;
 
-    fn modify(_eclass: &mut EClass<Math, Self>) {}
-    fn merge(&self, other: &Self) -> Self {
-        let sparsity = [self.sparsity, other.sparsity]
-            .into_iter().flatten().min().copied();
-        let nnz = [self.nnz, other.nnz]
-            .into_iter().flatten().min().copied();
-        debug_assert_eq!(&self.schema, &other.schema);
-        let schema = self.schema.clone();
+    fn modify(_egraph: &mut EGraph, _id: Id) {}
+    fn merge(&mut self, a: &mut Self::Data, b: Self::Data) -> DidMerge {
+        let sparsity = [a.sparsity, b.sparsity]
+            .iter()
+            .flatten()
+            .min()
+            .copied();
+        let nnz = [a.nnz, b.nnz].iter().flatten().min().copied();
+        debug_assert_eq!(&a.schema, &b.schema);
+        let schema = a.schema.clone();
         // NOTE perhaps move the special case for 0 to
         // make(Mul)?
         // match (&sparsity, &nnz)  {
@@ -402,375 +361,181 @@ impl egg::egraph::Metadata<Math> for Meta {
         //        self.schema.clone()
         //    }
         //};
-        Meta {schema, sparsity, nnz}
-    }
-
-    fn make(expr: Expr<Math, &Self>) -> Self {
-        use Math::*;
-        let schema = match expr.op {
-            Ind => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in mul");
-                let x = &expr.children[0];
-                let y = &expr.children[1];
-
-                let mut schema = x.schema.as_ref().unwrap().get_schm().clone();
-                let y_schema = y.schema.as_ref().unwrap().get_schm().clone();
-                schema.extend(y_schema);
-
-                let sparsity = min(x.sparsity, y.sparsity);
-
-                let nnz = sparsity.map(|sp| {
-                    let vol: usize = schema.values().product();
-                    let nnz = NotNan::from(vol as f64) * sp;
-                    nnz.round() as usize
-                });
-
-                let schema = Some(Schema::Schm(schema));
-
-                Meta {schema, sparsity, nnz}
-            },
-            Add => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in add");
-                let x = &expr.children[0];
-                let y = &expr.children[1];
-
-                let mut schema = x.schema.as_ref().unwrap().get_schm().clone();
-                let y_schema = y.schema.as_ref().unwrap().get_schm().clone();
-                schema.extend(y_schema);
-
-                let sparsity = x.sparsity.and_then(|x| y.sparsity.map(|y| {
-                        min(1.0.into(), x + y)
-                }));
-
-                let nnz = sparsity.map(|sp| {
-                    let vol: usize = schema.values().product();
-                    let nnz = NotNan::from(vol as f64) * sp;
-                    nnz.round() as usize
-                });
-
-                let schema = Some(Schema::Schm(schema));
-
-                Meta {schema, sparsity, nnz}
-            },
-            Mul => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in mul");
-                let x = &expr.children[0];
-                let y = &expr.children[1];
-
-                let mut schema = x.schema.as_ref().unwrap().get_schm().clone();
-                let y_schema = y.schema.as_ref().unwrap().get_schm().clone();
-                schema.extend(y_schema);
-
-                let sparsity = min(x.sparsity, y.sparsity);
-
-                let nnz = sparsity.map(|sp| {
-                    let vol: usize = schema.values().product();
-                    let nnz = NotNan::from(vol as f64) * sp;
-                    nnz.round() as usize
-                });
-
-                let schema = Some(Schema::Schm(schema));
-
-                Meta {schema, sparsity, nnz}
-            },
-            Agg => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in sum");
-                let body = &expr.children[1];
-
-                let k = expr_schema(&expr, 0).get_dims().0;
-                let mut body_schema = body.schema.as_ref().unwrap().get_schm().clone();
-                body_schema.remove(k);
-
-                let vol = body_schema.values().product();
-                let sparsity = body.nnz.map(|nnz| { min(
-                    1.0.into(),
-                    NotNan::from(nnz as f64 / vol as f64)
-                )});
-                let nnz = body.nnz.map(|z| min(vol, z));
-
-                let schema = Some(Schema::Schm(body_schema));
-
-                Meta {schema, sparsity, nnz}
-            },
-            RMMul => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in rmmul");
-                let x = &expr.children[0];
-                let y = &expr.children[1];
-
-                let mut x_schema = x.schema.as_ref().unwrap().get_schm().clone();
-                let x_keys: HashSet<_> = x_schema.keys().cloned().collect();
-                let y_schema = y.schema.as_ref().unwrap().get_schm().clone();
-                let y_keys: HashSet<_> = y_schema.keys().cloned().collect();
-
-                let j = x_keys.intersection(&y_keys).next().unwrap();
-
-                x_schema.extend(y_schema);
-                x_schema.remove(j);
-
-                let vol: usize = x_schema.values().product();
-                let sparsity = Some(1.0.into());
-                let nnz = Some(vol);
-
-                let schema = Some(Schema::Schm(x_schema));
-
-                Meta {schema, sparsity, nnz}
-            }
-            Lit => {
-                let num = &expr.children[0];
-                Meta {
-                    schema: Some(Schema::Schm(HashMap::default())),
-                    sparsity: num.sparsity,
-                    nnz: num.nnz
-                }
-            },
-            Mat => {
-                debug_assert_eq!(expr.children.len(), 4, "wrong length in matrix");
-                let (i, n) = expr_schema(&expr, 1).get_dims();
-                let (j, m) = expr_schema(&expr, 2).get_dims();
-
-                let mut schema = HashMap::new();
-                if *n != 1 {
-                    schema.insert(i.clone(), *n);
-                }
-                if *m != 1 {
-                    schema.insert(j.clone(), *m);
-                };
-
-                let nnz = expr.children[3].nnz;
-
-                Meta {
-                    schema: Some(Schema::Schm(schema)),
-                    nnz,
-                    sparsity: Some(NotNan::from(nnz.unwrap() as f64 / (n * m) as f64))
-                }
-            },
-            Dim => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in dim");
-                let schema = Schema::Dims(
-                    expr_schema(&expr, 0).get_name().clone(),
-                    *expr_schema(&expr, 1).get_size(),
-                );
-                Meta {
-                    schema: Some(schema),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            Sub => {
-                debug_assert_eq!(expr.children.len(), 3, "wrong length in subst");
-                let (e_i, e_n) = expr_schema(&expr, 0).get_dims();
-                let (v_i, v_n) = expr_schema(&expr, 1).get_dims();
-                debug_assert_eq!(e_n, v_n, "substituting for different size");
-                let body = &expr.children[2];
-
-                let schema = match &body.schema.as_ref().unwrap() {
-                    Schema::Schm(schema) => {
-                        let mut res = schema.clone();
-                        if let Some(m) = res.remove(v_i) {
-                            res.insert(e_i.clone(), m);
-                        }
-                        Schema::Schm(res)
-                    },
-                    Schema::Dims(body_i, body_n) => {
-                        if body_i == v_i {
-                            Schema::Dims(e_i.clone(), *e_n)
-                        } else {
-                            Schema::Dims(body_i.clone(), *body_n)
-                        }
-                    },
-                    Schema::Size(n) => panic!("cannot subst for size {:?}", n),
-                    _ => panic!("cannot subst for attr. and mat")
-                };
-
-                Meta {
-                    schema: Some(schema),
-                    nnz: body.nnz,
-                    sparsity: body.sparsity
-                }
-            },
-            Var => {
-                Meta {
-                    schema: Some(Schema::Schm(HashMap::default())),
-                    nnz: Some(1),
-                    sparsity: Some(1.0.into())
-                }
-            },
-            Num(n) => {
-                Meta {
-                    schema: Some(Schema::Size(n.into_inner().round() as usize)),
-                    nnz: Some(if n == 0.0.into() { 0 } else { 1 }),
-                    sparsity: Some(if n == 0.0.into() {0.0.into()} else {1.0.into()})
-                }
-            },
-            Nnz => {
-                let n = expr_schema(&expr, 0).get_size();
-                Meta {
-                    schema: None,
-                    nnz: Some(*n),
-                    sparsity: None,
-                }
-            },
-            Str(s) => {
-                Meta {
-                    schema: Some(Schema::Name(s)),
-                    nnz: Some(1),
-                    sparsity: Some(1.0.into())
-                }
-            },
-            // Schema rules for LA plans
-            Udf => {
-                let op_s = expr_schema(&expr, 0).get_name();
-                let args = &expr.children[1..];
-                udf_meta(op_s, args)
-            },
-            LMat => {
-                debug_assert_eq!(expr.children.len(), 4, "wrong length in lmat");
-                let row = expr_schema(&expr, 1).get_size();
-                let col = expr_schema(&expr, 2).get_size();
-                let nnz = &expr.children[3].nnz;
-                Meta {
-                    schema: Some(Schema::Mat(*row, *col)),
-                    nnz: *nnz,
-                    sparsity: None
-                }
-            },
-            LMin => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in lmin");
-                let (x_i, x_j) = expr_schema(&expr, 0).get_mat();
-                let (y_i, y_j) = expr_schema(&expr, 1).get_mat();
-                dims_ok(*x_i, *x_j, *y_i, *y_j);
-                let row = if *x_i == 1 { y_i } else { x_i };
-                let col = if *x_j == 1 { y_j } else { x_j };
-                Meta {
-                    schema: Some(Schema::Mat(*row, *col)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            LAdd => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in ladd");
-                let (x_i, x_j) = expr_schema(&expr, 0).get_mat();
-                let (y_i, y_j) = expr_schema(&expr, 1).get_mat();
-                dims_ok(*x_i, *x_j, *y_i, *y_j);
-                let row = if *x_i == 1 { y_i } else { x_i };
-                let col = if *x_j == 1 { y_j } else { x_j };
-                Meta {
-                    schema: Some(Schema::Mat(*row, *col)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            LMul => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in lmul");
-                let (x_i, x_j) = expr_schema(&expr, 0).get_mat();
-                let (y_i, y_j) = expr_schema(&expr, 1).get_mat();
-                dims_ok(*x_i, *x_j, *y_i, *y_j);
-                let row = if *x_i == 1 { y_i } else { x_i };
-                let col = if *x_j == 1 { y_j } else { x_j };
-                Meta {
-                    schema: Some(Schema::Mat(*row, *col)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            MMul => {
-                debug_assert_eq!(expr.children.len(), 2, "wrong length in mmul");
-                let (x_i, x_j) = expr_schema(&expr, 0).get_mat();
-                let (y_i, y_j) = expr_schema(&expr, 1).get_mat();
-                debug_assert_eq!(*x_j, *y_i, "wrong dimensions in mmul");
-                Meta {
-                    schema: Some(Schema::Mat(*x_i, *y_j)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            LTrs => {
-                debug_assert_eq!(expr.children.len(), 1, "wrong length in transpose");
-                let (x_i, x_j) = expr_schema(&expr, 0).get_mat();
-                Meta {
-                    schema: Some(Schema::Mat(*x_j , *x_i)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            Srow => {
-                debug_assert_eq!(expr.children.len(), 1, "wrong length in transpose");
-                let x_i = expr_schema(&expr, 0).get_mat().0;
-                Meta {
-                    schema: Some(Schema::Mat(*x_i , 1)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            Scol => {
-                debug_assert_eq!(expr.children.len(), 1, "wrong length in transpose");
-                let x_j = expr_schema(&expr, 0).get_mat().1;
-                Meta {
-                    schema: Some(Schema::Mat(1, *x_j)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            Sall => {
-                Meta {
-                    schema: Some(Schema::Mat(1, 1)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            Bind => {
-                debug_assert_eq!(expr.children.len(), 3, "wrong length in lmat");
-                let i = expr_schema(&expr, 0).get_name();
-                let j = expr_schema(&expr, 1).get_name();
-                let x = &expr.children[2];
-                let (x_row, x_col) = expr_schema(&expr, 2).get_mat();
-                let mut schema = HashMap::new();
-                if *x_row != 1 {
-                    schema.insert(i.clone(), *x_row);
-                }
-                if *x_col != 1 {
-                    schema.insert(j.clone(), *x_col);
-                }
-                Meta {
-                    schema: Some(Schema::Schm(schema)),
-                    nnz: x.nnz,
-                    sparsity: x.sparsity
-                }
-            },
-            Ubnd => {
-                debug_assert_eq!(expr.children.len(), 3, "wrong length in ubind");
-                let i = expr_schema(&expr, 0).get_name();
-                let j = expr_schema(&expr, 1).get_name();
-                let x = &expr.children[2];
-                let x_schm = expr_schema(&expr, 2).get_schm();
-                let row = *x_schm.get(i).unwrap_or(&1);
-                let col = *x_schm.get(j).unwrap_or(&1);
-                Meta {
-                    schema: Some(Schema::Mat(row, col)),
-                    nnz: x.nnz,
-                    sparsity: x.sparsity
-                }
-            },
-            LLit => {
-                debug_assert_eq!(expr.children.len(), 1, "wrong length in lmat");
-                Meta {
-                    schema: Some(Schema::Mat(1, 1)),
-                    nnz: None,
-                    sparsity: None
-                }
-            },
-            TWrite(_) => Meta {
-                schema: None,
-                nnz: None,
-                sparsity: None,
-            },
+        let new = MetaData {
+            schema,
+            sparsity,
+            nnz,
         };
-        schema
+        let did_merge = DidMerge(a != &new, b != new);
+        *a = new;
+        did_merge
     }
-}
 
-fn expr_schema<'a>(expr: &Expr<Math, &'a Meta>, i: usize) -> &'a Schema {
-    expr.children[i].schema.as_ref().unwrap()
+    fn make(egraph: &mut EGraph, enode: &Math, _id: Id) -> Self::Data {
+        use Math::*;
+        let egraph: &EGraph = egraph;
+        // Helper: get analysis data for a child id
+        let d = |id: &Id| &egraph[*id].data;
+        // Helper: get schema for a child id (panics if None)
+        let schm = |id: &Id| d(id).schema.as_ref().unwrap();
+        match enode {
+            Ind([x, y]) | Add([x, y]) | Mul([x, y]) => {
+                let (xd, yd) = (d(x), d(y));
+                let mut s = xd.schema.as_ref().unwrap().get_schm().clone();
+                s.extend(yd.schema.as_ref().unwrap().get_schm().clone());
+                let sparsity = match enode {
+                    Add(..) => xd.sparsity.and_then(|a| yd.sparsity.map(|b| min(1.0.into(), a + b))),
+                    _ => min(xd.sparsity, yd.sparsity),
+                };
+                let nnz = sparsity.map(|sp| {
+                    let vol: usize = s.values().product();
+                    (NotNan::from(vol as f64) * sp).round() as usize
+                });
+                MetaData { schema: Some(Schema::Schm(s)), sparsity, nnz }
+            }
+            Agg([dim, body]) => {
+                let k = schm(dim).get_dims().0.clone();
+                let bd = d(body);
+                let mut body_schm = bd.schema.as_ref().unwrap().get_schm().clone();
+                body_schm.remove(&k);
+                let vol: usize = body_schm.values().product();
+                let sparsity = bd.nnz.map(|nnz| min(1.0.into(), NotNan::from(nnz as f64 / vol as f64)));
+                let nnz = bd.nnz.map(|z| min(vol, z));
+                MetaData { schema: Some(Schema::Schm(body_schm)), sparsity, nnz }
+            }
+            RMMul([x, y]) => {
+                let mut xs = d(x).schema.as_ref().unwrap().get_schm().clone();
+                let x_keys: HashSet<_> = xs.keys().cloned().collect();
+                let ys = d(y).schema.as_ref().unwrap().get_schm().clone();
+                let y_keys: HashSet<_> = ys.keys().cloned().collect();
+                let j = x_keys.intersection(&y_keys).next().unwrap().clone();
+                xs.extend(ys);
+                xs.remove(&j);
+                let vol: usize = xs.values().product();
+                MetaData { schema: Some(Schema::Schm(xs)), sparsity: Some(1.0.into()), nnz: Some(vol) }
+            }
+            Lit([num]) => {
+                let nd = d(num);
+                MetaData { schema: Some(Schema::Schm(HashMap::default())), sparsity: nd.sparsity, nnz: nd.nnz }
+            }
+            Mat([_x, i_dim, j_dim, nnz_id]) => {
+                let (i, n) = { let s = schm(i_dim).get_dims(); (s.0.clone(), *s.1) };
+                let (j, m) = { let s = schm(j_dim).get_dims(); (s.0.clone(), *s.1) };
+                let nnz = d(nnz_id).nnz;
+                let mut s = HashMap::new();
+                if n != 1 { s.insert(i, n); }
+                if m != 1 { s.insert(j, m); }
+                MetaData {
+                    schema: Some(Schema::Schm(s)),
+                    nnz,
+                    sparsity: Some(NotNan::from(nnz.unwrap() as f64 / (n * m) as f64)),
+                }
+            }
+            Dim([name_id, size_id]) => {
+                let name = schm(name_id).get_name().clone();
+                let size = *schm(size_id).get_size();
+                MetaData { schema: Some(Schema::Dims(name, size)), nnz: None, sparsity: None }
+            }
+            Sub([e, v, body]) => {
+                let (e_i, e_n) = { let s = schm(e).get_dims(); (s.0.clone(), *s.1) };
+                let (v_i, v_n) = { let s = schm(v).get_dims(); (s.0.clone(), *s.1) };
+                debug_assert_eq!(e_n, v_n, "substituting for different size");
+                let (body_schm, body_nnz, body_sp) = {
+                    let bd = d(body);
+                    (bd.schema.clone(), bd.nnz, bd.sparsity)
+                };
+                let new_schema = match body_schm.as_ref().unwrap() {
+                    Schema::Schm(s) => {
+                        let mut res = s.clone();
+                        if let Some(m) = res.remove(&v_i) { res.insert(e_i, m); }
+                        Schema::Schm(res)
+                    }
+                    Schema::Dims(body_i, body_n) => {
+                        if *body_i == v_i { Schema::Dims(e_i, e_n) }
+                        else { Schema::Dims(body_i.clone(), *body_n) }
+                    }
+                    Schema::Size(n) => panic!("cannot subst for size {:?}", n),
+                    _ => panic!("cannot subst for attr. and mat"),
+                };
+                MetaData { schema: Some(new_schema), nnz: body_nnz, sparsity: body_sp }
+            }
+            Var([_]) => MetaData {
+                schema: Some(Schema::Schm(HashMap::default())),
+                nnz: Some(1),
+                sparsity: Some(1.0.into()),
+            },
+            Num(n) => MetaData {
+                schema: Some(Schema::Size((*n).max(0) as usize)),
+                nnz: Some(if *n == 0 { 0 } else { 1 }),
+                sparsity: Some(if *n == 0 { 0.0.into() } else { 1.0.into() }),
+            },
+            Nnz([n]) => MetaData { schema: None, nnz: Some(*schm(n).get_size()), sparsity: None },
+            Str(s) => MetaData {
+                schema: Some(Schema::Name(s.clone())),
+                nnz: Some(1),
+                sparsity: Some(1.0.into()),
+            },
+            Udf([op_id, arg_id]) => {
+                let op_s = schm(op_id).get_name().clone();
+                let arg_data = d(arg_id);
+                udf_meta(&op_s, &[arg_data])
+            }
+            LMat([_x, row, col, nnz_id]) => {
+                let row_sz = *schm(row).get_size();
+                let col_sz = *schm(col).get_size();
+                let nnz = d(nnz_id).nnz;
+                MetaData { schema: Some(Schema::Mat(row_sz, col_sz)), nnz, sparsity: None }
+            }
+            LMin([x, y]) | LAdd([x, y]) | LMul([x, y]) => {
+                let (x_i, x_j) = { let s = schm(x).get_mat(); (*s.0, *s.1) };
+                let (y_i, y_j) = { let s = schm(y).get_mat(); (*s.0, *s.1) };
+                dims_ok(x_i, x_j, y_i, y_j);
+                let row = if x_i == 1 { y_i } else { x_i };
+                let col = if x_j == 1 { y_j } else { x_j };
+                MetaData { schema: Some(Schema::Mat(row, col)), nnz: None, sparsity: None }
+            }
+            MMul([x, y]) => {
+                let (x_i, x_j) = { let s = schm(x).get_mat(); (*s.0, *s.1) };
+                let (y_i, y_j) = { let s = schm(y).get_mat(); (*s.0, *s.1) };
+                debug_assert_eq!(x_j, y_i, "wrong dimensions in mmul");
+                MetaData { schema: Some(Schema::Mat(x_i, y_j)), nnz: None, sparsity: None }
+            }
+            LTrs([a]) => {
+                let (x_i, x_j) = { let s = schm(a).get_mat(); (*s.0, *s.1) };
+                MetaData { schema: Some(Schema::Mat(x_j, x_i)), nnz: None, sparsity: None }
+            }
+            Srow([a]) => {
+                let x_i = *schm(a).get_mat().0;
+                MetaData { schema: Some(Schema::Mat(x_i, 1)), nnz: None, sparsity: None }
+            }
+            Scol([a]) => {
+                let x_j = *schm(a).get_mat().1;
+                MetaData { schema: Some(Schema::Mat(1, x_j)), nnz: None, sparsity: None }
+            }
+            Sall([_]) => MetaData { schema: Some(Schema::Mat(1, 1)), nnz: None, sparsity: None },
+            Bind([i, j, x]) => {
+                let i_name = schm(i).get_name().clone();
+                let j_name = schm(j).get_name().clone();
+                let (x_row, x_col) = { let s = schm(x).get_mat(); (*s.0, *s.1) };
+                let (x_nnz, x_sp) = { let xd = d(x); (xd.nnz, xd.sparsity) };
+                let mut s = HashMap::new();
+                if x_row != 1 { s.insert(i_name, x_row); }
+                if x_col != 1 { s.insert(j_name, x_col); }
+                MetaData { schema: Some(Schema::Schm(s)), nnz: x_nnz, sparsity: x_sp }
+            }
+            Ubnd([i, j, x]) => {
+                let i_name = schm(i).get_name().clone();
+                let j_name = schm(j).get_name().clone();
+                let x_schm = schm(x).get_schm().clone();
+                let (x_nnz, x_sp) = { let xd = d(x); (xd.nnz, xd.sparsity) };
+                let row = *x_schm.get(&i_name).unwrap_or(&1);
+                let col = *x_schm.get(&j_name).unwrap_or(&1);
+                MetaData { schema: Some(Schema::Mat(row, col)), nnz: x_nnz, sparsity: x_sp }
+            }
+            LLit([_]) => MetaData { schema: Some(Schema::Mat(1, 1)), nnz: None, sparsity: None },
+            TWrite(_) => MetaData { schema: None, nnz: None, sparsity: None },
+        }
+    }
 }
 
 fn dims_ok(x_i: usize, x_j: usize, y_i: usize, y_j: usize) {
@@ -782,24 +547,40 @@ fn dims_ok(x_i: usize, x_j: usize, y_i: usize, y_j: usize) {
             || (y_i == 1 && x_j == y_j)
             || (x_i == 1 && x_j == 1)
             || (y_i == 1 && y_j == 1),
-        format!("{:?}", (x_i, x_j, y_i, y_j))
+        "{:?}", (x_i, x_j, y_i, y_j)
     );
 }
 
-define_term! {
-    #[derive(Debug, PartialEq, Eq, Hash, Clone)]
+define_language! {
     pub enum Math {
         // LA
-        LMat = "lmat", LAdd = "l+", LMin = "l-",
-        LMul = "l*", MMul = "m*", LTrs = "trans",
-        Srow = "srow", Scol = "scol", Sall = "sall",
-        Bind = "b+", Ubnd = "b-", LLit = "llit",
-        Udf = "udf",
+        "lmat" = LMat([Id; 4]) ,
+        "l+" = LAdd([Id; 2]) ,
+        "l-" = LMin([Id; 2]) ,
+        "l*" = LMul([Id; 2]) ,
+        "m*" = MMul([Id; 2]) ,
+        "trans" = LTrs([Id; 1]) ,
+        "srow" = Srow([Id; 1]) ,
+        "scol" = Scol([Id; 1]) ,
+        "sall" = Sall([Id; 1]) ,
+        "b+" = Bind([Id; 3]) ,
+        "b-" = Ubnd([Id; 3]) ,
+        "llit" = LLit([Id; 1]) ,
+        "udf" = Udf([Id; 2]) ,
         // RA
-        Add = "+", Mul = "*", Agg = "sum", RMMul = "rm*",
-        Lit = "lit", Var = "var", Mat = "mat",
-        Dim = "dim", Nnz = "nnz", Sub = "subst", Ind = "ind",
-        Num(Number), Str(String),
+        "+" = Add([Id; 2]),
+        "*" = Mul([Id; 2]),
+        "sum" = Agg([Id; 2]),
+        "rm*" = RMMul([Id; 2]),
+        "lit" = Lit([Id; 1]),
+        "var" = Var([Id; 1]),
+        "mat" = Mat([Id; 4]),
+        "dim" = Dim([Id; 2]),
+        "nnz" = Nnz([Id; 1]),
+        "subst" = Sub([Id; 3]),
+        "ind" = Ind([Id; 2]),
+        Num(i32),
+        Str(String),
         // NOTE careful here, TWrite might be parsed as Str
         TWrite(String),
     }
@@ -807,42 +588,38 @@ define_term! {
 
 // Cost to translate to LA
 // TODO twrite?
-impl Language for Math {
-    fn cost(&self, children: &[f64]) -> f64 {
-        use Math::*;
-        let cost = match self {
-            LMat | LAdd | LMin | LMul |
-            MMul | LTrs | Srow | Scol |
-            Sall | LLit | Udf |
-            Num(_) | Str(_)=> 1.0,
-            _ => 100.0
-        };
-        cost + children.iter().sum::<f64>()
-    }
-}
+// impl Language for Math {
+//     fn cost(&self, children: &[f64]) -> f64 {
+//         use Math::*;
+//         let cost = match self {
+//             LMat | LAdd | LMin | LMul | MMul | LTrs | Srow | Scol | Sall | LLit | Udf | Num(_)
+//             | Str(_) => 1.0,
+//             _ => 100.0,
+//         };
+//         cost + children.iter().sum::<f64>()
+//     }
+// }
 
 // Cost to translation to RA
 // TODO twrite?
 fn trans_model(op: &Math, children: &[f64]) -> f64 {
     use Math::*;
     let cost = match op {
-        LMat | LAdd | LMin | LMul |
-        MMul | LTrs | Srow | Scol |
-        Sall | LLit |
-        Sub => 100.0,
-        Bind | Ubnd => 10.0,
-        _ => 1.0
+        LMat(..) | LAdd(..) | LMin(..) | LMul(..) | MMul(..) | LTrs(..) | Srow(..) | Scol(..)
+        | Sall(..) | LLit(..) | Sub(..) => 100.0,
+        Bind(..) | Ubnd(..) => 10.0,
+        _ => 1.0,
     };
     let c_cost: f64 = children.iter().sum();
     cost + c_cost
 }
 
-pub fn get_vol(m: &Meta) -> usize {
+pub fn get_vol(m: &MetaData) -> usize {
     if let Some(schm) = &m.schema {
         match schm {
             Schema::Schm(s) => s.values().product(),
             Schema::Mat(r, c) => r * c,
-            _ => 0
+            _ => 0,
         }
     } else {
         0

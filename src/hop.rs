@@ -1,76 +1,54 @@
-use crate::{Math, EGraph, Expr};
-use egg::parse::ParsableLanguage;
+use crate::{Math, EGraph};
 use std::collections::HashMap;
-use smallvec::smallvec;
+use egg::{Id, Language, RecExpr};
 
 pub static HOP: &str = "29,29;80;LiteralOp 6.14;;0,0,-1,-1,-1;S;D;0,0,0,0;;;";
 
 #[derive(Debug)]
+enum HopOp {
+    Num(f64),
+    Var(String),
+    Write(String),
+    Udf(String),
+    Op(String),
+}
+
+#[derive(Debug)]
 pub struct Hop {
     id: u32,
-    op: Math,
+    op: HopOp,
     children: Vec<u32>,
     row: u32,
     col: u32,
     nnz: Option<i32>,
 }
 
-fn op(s: &str) -> Option<Math> {
-    use Math::*;
+fn parse_op(s: &str) -> HopOp {
     match s {
-        "r(t)" => Some(LTrs),
-        "b(*)" => Some(LMul),
-        "b(+)" => Some(LAdd),
-        "b(-)" => Some(LMin),
-        "ba(+*)" => Some(MMul),
-        "ua(+R)" => Some(Srow),
-        "ua(+C)" => Some(Scol),
-        "ua(+RC)" => Some(Sall),
-        _ => None,
+        "r(t)" | "b(*)" | "b(+)" | "b(-)" | "ba(+*)" | "ua(+R)" | "ua(+C)" | "ua(+RC)" => {
+            HopOp::Op(s.to_owned())
+        }
+        _ if s.starts_with("LiteralOp") => {
+            let n: f64 = s.split_whitespace().nth(1).unwrap().parse().unwrap();
+            HopOp::Num(n)
+        }
+        _ if s.starts_with("TRead") => {
+            let v = s.split_whitespace().nth(1).unwrap();
+            HopOp::Var(v.to_owned())
+        }
+        _ if s.starts_with("TWrite") => {
+            let v = s.split_whitespace().nth(1).unwrap();
+            HopOp::Write(v.to_owned())
+        }
+        _ => HopOp::Udf(s.to_owned()),
     }
-}
-
-fn get_lit(s: &str) -> Option<Math> {
-    if s.starts_with("LiteralOp") {
-        let n: f64 = s.split_whitespace().nth(1).unwrap().parse().unwrap();
-        Some(Math::Num(n.into()))
-    } else {
-        None
-    }
-}
-
-fn get_var(s: &str) -> Option<Math> {
-    if s.starts_with("TRead") {
-        let v = s.split_whitespace().nth(1).unwrap();
-        Some(Math::Str(v.to_owned()))
-    } else {
-        None
-    }
-}
-
-fn get_write(s: &str) -> Option<Math> {
-    if s.starts_with("TWrite") {
-        let v = s.split_whitespace().nth(1).unwrap();
-        Some(Math::TWrite(v.to_owned()))
-    } else {
-        None
-    }
-}
-
-fn get_udf(s: &str) -> Option<Math> {
-    Some(Math::Str(s.to_owned()))
 }
 
 pub fn parse_hop(s: &str) -> Hop {
     let hop: Vec<_> = s.split(";").collect();
     let id: u32 = hop[1].parse().unwrap();
     let op_s = hop[2];
-    let op = op(op_s)
-        .or(get_write(op_s))
-        .or(get_var(op_s))
-        .or(get_lit(op_s))
-        .or(get_udf(op_s))
-        .unwrap();
+    let op = parse_op(op_s);
     let children: Vec<u32> = hop[3].split(",").filter_map(|s| s.parse().ok()).collect();
 
     let meta: Vec<Option<i32>> = hop[4].split(",").map(|s| s.parse().ok()).collect();
@@ -83,54 +61,61 @@ pub fn parse_hop(s: &str) -> Hop {
         nnz = Some(row as i32 * col as i32)
     }
 
-    Hop{id, op, children, row : row as u32, col : col as u32, nnz}
+    Hop { id, op, children, row: row as u32, col: col as u32, nnz }
 }
 
-pub fn load_dag(egraph: &mut EGraph, s: &str) -> Vec<u32> {
+fn build_la_math(op_str: &str, children: &[Id]) -> Math {
     use Math::*;
-    let mut id_map = HashMap::new();
+    match op_str {
+        "r(t)"    => LTrs([children[0]]),
+        "b(*)"    => LMul([children[0], children[1]]),
+        "b(+)"    => LAdd([children[0], children[1]]),
+        "b(-)"    => LMin([children[0], children[1]]),
+        "ba(+*)"  => MMul([children[0], children[1]]),
+        "ua(+R)"  => Srow([children[0]]),
+        "ua(+C)"  => Scol([children[0]]),
+        "ua(+RC)" => Sall([children[0]]),
+        _ => panic!("unknown LA op: {}", op_str),
+    }
+}
+
+pub fn load_dag(egraph: &mut EGraph, s: &str) -> Vec<Id> {
+    let mut id_map: HashMap<u32, Id> = HashMap::new();
     let hops = s.lines();
     let mut roots = vec![];
     for h in hops {
         let hop = parse_hop(h);
-        // TODO special case for literal, string
         match hop.op {
-            Num(n) => {
-                let s = format!("(llit {})", n);
-                let exp = Math::parse_expr(&s).unwrap();
+            HopOp::Num(n) => {
+                let expr_s = format!("(llit {})", n as i32);
+                let exp: RecExpr<Math> = expr_s.parse().unwrap();
                 let lit = egraph.add_expr(&exp);
                 id_map.insert(hop.id, lit);
-            },
-            Str(x) => {
-                let mut args = hop.children;
-                if args.is_empty() {
-                    let m = format!("(lmat {x} {i} {j} {z})", x=x, i=hop.row, j=hop.col, z=hop.nnz.unwrap());
-                    let exp = Math::parse_expr(&m).unwrap();
-                    let mat = egraph.add_expr(&exp);
-                    id_map.insert(hop.id, mat);
-                } else {
-                    // add dimensions to children for rix / lix (right and left index)
-                    if x == "rix" || x == "lix" {
-                        let row = egraph.add(Expr::new(Math::Num((hop.row as f64).into()), smallvec![]));
-                        let col = egraph.add(Expr::new(Math::Num((hop.col as f64).into()), smallvec![]));
-                        args.push(row.id);
-                        args.push(col.id);
-                        id_map.insert(row.id, row.id);
-                        id_map.insert(col.id, col.id);
-                    }
-                    let op_s = egraph.add(Expr::new(Str(x), smallvec![]));
-                    let mut children  = smallvec![op_s.id];
-                    children.extend(args.iter().map(|c| id_map[c]));
-                    let udf = egraph.add(Expr::new(Udf, children)).id;
-                    id_map.insert(hop.id, udf);
-                }
-            },
-            op => {
-                let children: Vec<_> = hop.children.iter().map(|c| id_map[c]).collect();
-                let id = egraph.add(Expr::new(op.clone(), children.into())).id;
-                if let TWrite(_) = op {
-                    roots.push(id);
-                }
+            }
+            HopOp::Var(x) => {
+                let m = format!("(lmat {x} {i} {j} {z})",
+                    x = x, i = hop.row, j = hop.col, z = hop.nnz.unwrap());
+                let exp: RecExpr<Math> = m.parse().unwrap();
+                let mat = egraph.add_expr(&exp);
+                id_map.insert(hop.id, mat);
+            }
+            HopOp::Write(x) => {
+                // TWrite is a leaf in the current language definition; child connection is lost.
+                let id = egraph.add(Math::TWrite(x));
+                roots.push(id);
+                id_map.insert(hop.id, id);
+            }
+            HopOp::Udf(x) => {
+                let children: Vec<Id> = hop.children.iter().map(|c| id_map[c]).collect();
+                let op_id = egraph.add(Math::Str(x));
+                let arg_id = if children.is_empty() { op_id } else { children[0] };
+                let udf = egraph.add(Math::Udf([op_id, arg_id]));
+                id_map.insert(hop.id, udf);
+            }
+            HopOp::Op(s) => {
+                let children: Vec<Id> = hop.children.iter().map(|c| id_map[c]).collect();
+                let math = build_la_math(&s, &children);
+                let id = egraph.add(math);
                 id_map.insert(hop.id, id);
             }
         }
@@ -143,62 +128,35 @@ pub fn print_dag(egraph: &EGraph) {
     for c in egraph.classes() {
         let id = &c.id;
         for e in &c.nodes {
-            let op = &e.op;
-            match op {
-                Str(_) | Num(_) => {
-                    // println!("STRNUM id{} {:?}", id, op);
-                },
-                Udf => {
-                    print!("0,0;{id};", id=id);
-                    let f = e.children[0];
-                    let op = format!("{}", &egraph[f].nodes[0].op);
+            match e {
+                Str(_) | Num(_) => {}
+                Udf([op_id, arg_id]) => {
+                    print!("0,0;{id};", id = id);
+                    let op = format!("{}", &egraph[*op_id].nodes[0]);
                     print!("{};", op);
-                    //for e in &egraph[f].nodes {
-                    //    print!("{};", e.op);
-                    //}
-                    let args = if op == "rix" {
-                        &e.children[1..6]
-                    } else if op == "lix" {
-                        &e.children[1..7]
-                    } else {
-                        &e.children[1..]
-                    };
-                    for c in args {
-                        print!("{},",c);
-                    }
-                    println!(";;M;D;;;;;")
-                },
-                LMat => {
-                    print!("0,0;{id};TRead ", id=id);
-                    let x = e.children[0];
-                    for e in &egraph[x].nodes {
-                        print!("{}", e.op);
-                    }
-                    println!(";;;M;D;;;;;")
-                },
-                LLit => {
-                    print!("0,0;{id};LiteralOp ", id=id);
-                    for c in &e.children {
-                        for e in &egraph[*c].nodes {
-                            print!("{}", e.op);
-                        }
-                    }
+                    print!("{},", arg_id);
+                    println!(";;M;D;;;;;");
+                }
+                LMat([name_id, _, _, _]) => {
+                    print!("0,0;{id};TRead ", id = id);
+                    print!("{}", &egraph[*name_id].nodes[0]);
                     println!(";;;M;D;;;;;");
-                },
+                }
+                LLit([val_id]) => {
+                    print!("0,0;{id};LiteralOp ", id = id);
+                    print!("{}", &egraph[*val_id].nodes[0]);
+                    println!(";;;M;D;;;;;");
+                }
                 TWrite(s) => {
-                    print!("0,0;{id};TWrite {var};", id=id, var=s);
-                    for c in &e.children {
-                        print!("{},",c);
-                    }
-                    println!(";;M;D;;;;;")
-                },
-                Var => {
+                    println!("0,0;{id};TWrite {var};;;M;D;;;;;", id = id, var = s);
+                }
+                Var([_]) => {
                     println!("var");
-                },
-                op => {
-                    print!("0,0;{id};{op};", id = id, op=dml_op(op));
-                    for c in &e.children {
-                        print!("{},",c);
+                }
+                e => {
+                    print!("0,0;{id};{op};", id = id, op = dml_op(e));
+                    for c in e.children() {
+                        print!("{},", c);
                     }
                     println!(";;M;D;;;;;");
                 }
@@ -210,18 +168,17 @@ pub fn print_dag(egraph: &EGraph) {
 fn dml_op(op: &Math) -> &'static str {
     use Math::*;
     match op {
-        LAdd => "b(+)",
-        LMin => "b(-)",
-        LMul => "b(*)",
-        MMul => "ba(+*)",
-        LTrs => "r(t)",
-        Srow => "ua(+R)",
-        Scol => "ua(+C)",
-        Sall => "ua(+RC)",
-        // o => panic!("unknown op {:?}", o)
+        LAdd(..) => "b(+)",
+        LMin(..) => "b(-)",
+        LMul(..) => "b(*)",
+        MMul(..) => "ba(+*)",
+        LTrs(..) => "r(t)",
+        Srow(..) => "ua(+R)",
+        Scol(..) => "ua(+C)",
+        Sall(..) => "ua(+RC)",
         o => {
             println!("UNK {}", o);
-            "UNKNWON OP"
+            "UNKNOWN OP"
         }
     }
 }
